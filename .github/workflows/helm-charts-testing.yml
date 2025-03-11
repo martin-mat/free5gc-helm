@@ -29,3 +29,8 @@ jobs:
       - name: Run chart-testing (lint)
         run: |
           helm lint --with-subcharts charts/*
+
+      - name: Run cnf-testsuite
+        uses: martin-mat/cnf-testsuite-action@poc
+        with:
+          helm_chart_dir: "charts/free5gc/charts/free5gc-chf"
