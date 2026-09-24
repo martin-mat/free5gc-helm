@@ -1,0 +1,69 @@
+name: CNTi certification
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cnti-certification
+  cancel-in-progress: false
+
+jobs:
+  cert:
+    runs-on: ubuntu-latest
+    # cert takes about 1.5 h on the suite's own runners; leave room for a
+    # slower shared 4-vCPU machine.
+    timeout-minutes: 240
+    env:
+      # Fifteen functions share the runner's four cores: scaling and
+      # rollouts take longer than the suite's 60-second default.
+      CNTI_TESTSUITE_GENERIC_OPERATION_TIMEOUT: "180"
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_PASSWORD != '' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_PASSWORD }}
+
+      # The UPF forwards through the gtp5g kernel module. kind nodes share the
+      # host kernel, so building the out-of-tree module on the runner is enough.
+      - name: Build and load the gtp5g kernel module
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential "linux-headers-$(uname -r)"
+          git clone --depth 1 https://github.com/free5gc/gtp5g.git /tmp/gtp5g
+          make -C /tmp/gtp5g -j"$(nproc)"
+          sudo make -C /tmp/gtp5g install
+          sudo modprobe gtp5g
+          lsmod | grep -q '^gtp5g' && echo "gtp5g loaded on kernel $(uname -r)"
+
+      - uses: lfn-cnti/testsuite-action@v1
+        with:
+          cnf_config: cnti-testsuite.yaml
+          kind_config: ci/kind-cnti.yaml
+          install_timeout: 1800
+          tests: cert
+
+      # Why did a function not come up? Pod state, events and logs from the
+      # kind cluster the action created (it lives until the job ends).
+      - name: Diagnostics
+        if: failure()
+        run: |
+          set +e
+          echo "::group::pods"; kubectl get pods -A -o wide; echo "::endgroup::"
+          echo "::group::node allocation"; kubectl describe nodes | grep -A9 "Allocated resources"; echo "::endgroup::"
+          for pod in $(kubectl get pods -n free5gc -o name); do
+            echo "::group::describe $pod"; kubectl describe -n free5gc "$pod" | tail -40; echo "::endgroup::"
+            echo "::group::logs $pod"; kubectl logs -n free5gc "$pod" --all-containers --tail=80; echo "::endgroup::"
+          done
+          echo "::group::events"; kubectl get events -n free5gc --sort-by=.lastTimestamp | tail -40; echo "::endgroup::"
