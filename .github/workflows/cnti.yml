@@ -1,0 +1,59 @@
+name: CNTi cert
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cnti-cert
+  cancel-in-progress: false
+
+jobs:
+  cert:
+    runs-on: ubuntu-latest
+    # A cert run took 68 minutes on ubuntu-latest (4 vCPU); this leaves
+    # room for a slow day without letting a stuck run hold the runner for
+    # hours.
+    timeout-minutes: 120
+    env:
+      # Fifteen functions share the runner's four cores: scaling and
+      # rollouts take longer than the suite's 60-second default.
+      CNTI_TESTSUITE_GENERIC_OPERATION_TIMEOUT: "180"
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_PASSWORD != '' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_PASSWORD }}
+
+      # The UPF forwards through the gtp5g kernel module. kind nodes share the
+      # host kernel, so building the out-of-tree module on the runner is enough.
+      - name: Build and load the gtp5g kernel module
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential "linux-headers-$(uname -r)"
+          git clone --depth 1 https://github.com/free5gc/gtp5g.git /tmp/gtp5g
+          make -C /tmp/gtp5g -j"$(nproc)"
+          sudo make -C /tmp/gtp5g install
+          sudo modprobe gtp5g
+          lsmod | grep -q '^gtp5g' && echo "gtp5g loaded on kernel $(uname -r)"
+
+      - uses: lfn-cnti/testsuite-action@v1
+        with:
+          # Pinned so a run is reproducible and a suite release is adopted on
+          # purpose; bump it after checking the release notes.
+          version: v2.0.0
+          cnf_config: cnti-testsuite.yaml
+          kind_config: ci/kind-cnti.yaml
+          install_timeout: 1800
+          tests: cert
