@@ -31,7 +31,7 @@ jobs:
   # publish the badge, and the only ones with a write token. Forks that enable
   # scheduled workflows do not run either job.
   cert:
-    if: github.repository == 'free5gc/free5gc-helm' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: github.repository == 'martin-mat/free5gc-helm' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # A cert run takes about 21 minutes on ubuntu-latest (4 vCPU) with
     # suite v2.1.0 (68 with v2.0.0); this leaves room for a slow day without
@@ -79,7 +79,7 @@ jobs:
   # branches: the same steps with a read-only token. The action publishes the
   # badge only from the default branch, so nothing is published here.
   cert-pr:
-    if: github.repository == 'free5gc/free5gc-helm' && (github.event_name == 'pull_request' || github.ref != 'refs/heads/main')
+    if: github.repository == 'martin-mat/free5gc-helm' && (github.event_name == 'pull_request' || github.ref != 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
