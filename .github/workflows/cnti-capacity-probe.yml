@@ -1,0 +1,65 @@
+name: CNTi capacity fix probe (temporary)
+on:
+  push:
+    branches: [probe-capacity]
+permissions:
+  contents: read
+jobs:
+  cert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2]
+    env:
+      CNTI_TESTSUITE_GENERIC_OPERATION_TIMEOUT: "180"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: lfn-cnti/testsuite
+          ref: fix/capacity-restart-check
+          path: testsuite
+          persist-credentials: false
+      - name: Refresh the package index
+        run: sudo apt-get update -qq
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.19.1
+      - name: Build the suite from the branch
+        working-directory: testsuite
+        run: |
+          set -euo pipefail
+          git log -1 --format='%h %s'
+          shards install
+          mkdir -p "$HOME/cnti-bin"
+          crystal build src/cnti-testsuite.cr -o "$HOME/cnti-bin/cnti-testsuite"
+          echo "$HOME/cnti-bin" >> "$GITHUB_PATH"
+          rm -rf "$GITHUB_WORKSPACE/testsuite"
+      - name: Build and load the gtp5g kernel module
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq build-essential "linux-headers-$(uname -r)"
+          git clone --depth 1 https://github.com/free5gc/gtp5g.git /tmp/gtp5g
+          make -C /tmp/gtp5g -j"$(nproc)"
+          sudo make -C /tmp/gtp5g install
+          sudo modprobe gtp5g
+      - uses: helm/kind-action@v1
+        with:
+          config: ci/kind-cnti.yaml
+          cluster_name: cnti-testsuite
+      - name: Cert
+        run: |
+          set -uo pipefail
+          cnti-testsuite setup
+          cnti-testsuite cnf_install --cnf-config cnti-testsuite.yaml --timeout 1800
+          cnti-testsuite cert; echo "exit code $?"
+      - name: Results
+        if: always()
+        run: |
+          f=$(ls -t cnti/results/*.yml | head -1)
+          awk '/- name: (increase_decrease_capacity|node_drain)$/{p=1} p&&/^  - name:/&&!/(increase_decrease_capacity|node_drain)$/{p=0} p' "$f" | head -80
+          grep -E "^(status|exit_code):" "$f" || true
