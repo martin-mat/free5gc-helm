@@ -1,0 +1,79 @@
+name: Litmus skip probe (temporary)
+on:
+  push:
+    branches: [probe-litmus]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: disk_fill-1, tests: disk_fill}
+          - {name: disk_fill-2, tests: disk_fill}
+          - {name: disk_fill-3, tests: disk_fill}
+          - {name: disk_fill-4, tests: disk_fill}
+          - {name: workload-1, tests: workload}
+          - {name: workload-2, tests: workload}
+    name: ${{ matrix.name }}
+    env:
+      CNTI_TESTSUITE_GENERIC_OPERATION_TIMEOUT: "180"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build and load the gtp5g kernel module
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential "linux-headers-$(uname -r)"
+          git clone --depth 1 https://github.com/free5gc/gtp5g.git /tmp/gtp5g
+          make -C /tmp/gtp5g -j"$(nproc)"
+          sudo make -C /tmp/gtp5g install
+          sudo modprobe gtp5g
+      # Records what Litmus does: every pod outside the CNF's own workloads in
+      # free5gc (chaos runners and experiment jobs) and in litmus, their logs,
+      # descriptions and events, and the ChaosExperiments, every 15 s.
+      - name: Litmus recorder
+        run: |
+          mkdir -p /tmp/litmus-rec
+          nohup bash -c '
+            until kubectl get ns free5gc >/dev/null 2>&1; do sleep 5; done
+            while true; do
+              for ns in free5gc litmus; do
+                for p in $(kubectl get pods -n $ns -o name 2>/dev/null | grep -vE "free5gc-free5gc-|mongodb-" ); do
+                  n=${p#pod/}
+                  kubectl logs -n $ns $n --all-containers --tail=300 > /tmp/litmus-rec/$ns-$n.log 2>&1
+                  kubectl describe -n $ns $p > /tmp/litmus-rec/$ns-$n.describe 2>&1
+                done
+              done
+              ts=$(date -u +%H%M%S)
+              kubectl get chaosexperiments,chaosengines,chaosresults -n free5gc -o wide > /tmp/litmus-rec/crs-$ts.txt 2>&1
+              kubectl get events -n free5gc --sort-by=.lastTimestamp 2>/dev/null | grep -viE "free5gc-free5gc-|mongodb" | tail -60 > /tmp/litmus-rec/events-$ts.txt
+              kubectl get pods -n litmus -o wide > /tmp/litmus-rec/litmus-pods-$ts.txt 2>&1
+              find /tmp/litmus-rec -name "crs-*" -mmin +30 -delete; find /tmp/litmus-rec -name "events-*" -mmin +30 -delete; find /tmp/litmus-rec -name "litmus-pods-*" -mmin +30 -delete
+              sleep 15
+            done' > /tmp/litmus-rec/recorder.out 2>&1 &
+      - uses: lfn-cnti/testsuite-action@05a9860905f31c6813f735d25e5cefd7c62a1e5a # v1.1.0
+        with:
+          version: v2.2.0
+          cnf_config: cnti-testsuite.yaml
+          kind_config: ci/kind-cnti.yaml
+          install_timeout: 1800
+          tests: ${{ matrix.tests }}
+          fail_on_failure: "false"
+          artifact_name: results-${{ matrix.name }}
+      - name: Skipped experiments
+        if: always()
+        run: |
+          grep -l '"status": "Skipped"' cnti/results/* 2>/dev/null | head -3 || true
+          kubectl get chaosengines -n free5gc -o json 2>/dev/null | jq -r '.items[] | "\(.metadata.name) \(.status.engineStatus) \(.status.experiments)"' | head -20 || true
+          kubectl logs -n litmus -l name=chaos-operator --tail=200 > /tmp/litmus-rec/operator-final.log 2>&1 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: litmus-rec-${{ matrix.name }}
+          path: /tmp/litmus-rec
