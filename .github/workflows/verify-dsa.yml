@@ -1,0 +1,66 @@
+# Fork-only: free5GC on main and with the dedicated ServiceAccounts, side by
+# side: the essential tests and dedicated_service_account, then who the pods
+# run as and whether their accounts can read the cluster.
+name: Verify dedicated ServiceAccounts
+on:
+  push:
+    branches: [verify-dsa]
+permissions:
+  contents: read
+jobs:
+  cnti:
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [upstream-main, fix]
+    name: ${{ matrix.ref }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CNTI_TESTSUITE_GENERIC_OPERATION_TIMEOUT: "180"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Chart from ${{ matrix.ref }}
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.ref }}" = upstream-main ]; then
+            git remote add upstream https://github.com/free5gc/free5gc-helm.git
+            git fetch -q upstream main
+            git checkout -q upstream/main -- charts
+            # Only the network functions' new files; MongoDB's chart has its own.
+            rm -f charts/free5gc/charts/free5gc-*/templates/serviceaccount.yaml
+          fi
+          ls charts/free5gc/charts/*/templates/serviceaccount.yaml
+      # gtp5g v0.10.2: the UPF of free5GC v4.3.0 rejects v0.10.3 (free5gc/free5gc#1212).
+      - name: Build and load the gtp5g kernel module
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential "linux-headers-$(uname -r)"
+          git clone -q --depth 1 --branch v0.10.2 https://github.com/free5gc/gtp5g.git /tmp/gtp5g
+          make -C /tmp/gtp5g -j"$(nproc)" >/dev/null
+          sudo make -C /tmp/gtp5g install >/dev/null
+          sudo modprobe gtp5g
+      - uses: lfn-cnti/testsuite-action@70536fda55fcb11f4f7463175fe9d57c86b85574 # v1.2.0
+        with:
+          version: v2.3.0
+          cnf_config: cnti-testsuite.yaml
+          kind_config: ci/kind-cnti.yaml
+          install_timeout: "1800"
+          tests: cert dedicated_service_account
+          fail_on_failure: "false"
+          artifact_name: results-${{ matrix.ref }}
+      - name: Who the pods run as
+        if: always()
+        run: |
+          set +e
+          kubectl -n free5gc get sa
+          kubectl -n free5gc get pods -o custom-columns='POD:.metadata.name,READY:.status.containerStatuses[*].ready,SA:.spec.serviceAccountName,TOKEN-VOLUME:.spec.volumes[*].projected.sources[*].serviceAccountToken.path'
+          echo "not ready:"; kubectl -n free5gc get pods --no-headers | awk '$2 !~ /^([0-9]+)\/\1$/ && $3 != "Completed"'
+          for sa in default free5gc-amf-free5gc; do
+            printf "can %s list pods cluster-wide? " "$sa"
+            kubectl auth can-i list pods --all-namespaces --as=system:serviceaccount:free5gc:$sa
+          done
+          echo "NRF registrations:"; kubectl -n free5gc logs deploy/free5gc-free5gc-nrf-nrf -c nrf 2>/dev/null | grep -ciE "NFRegister|Register NF" 
