@@ -70,11 +70,12 @@ jobs:
           cnti_cache_dir="$(realpath -m "$GITHUB_WORKSPACE/../../../.cnti-testsuite")"
           echo "$cnti_cache_dir" >> "$GITHUB_PATH"
 
-      - uses: lfn-cnti/testsuite-action@v1
+      # The action and the suite are both pinned to a release, so a run is
+      # reproducible and a new release is adopted on purpose: bump them after
+      # checking the release notes.
+      - uses: lfn-cnti/testsuite-action@caec9b0ba82b0f82e11e08eaed2cf5c1aa00dce4 # v1.3.0
         with:
-          # Pinned so a run is reproducible and a suite release is adopted on
-          # purpose; bump it after checking the release notes.
-          version: v2.2.0
+          version: v2.4.0
           cnf_config: cnti-testsuite.yaml
           kind_config: ci/kind-cnti.yaml
           install_timeout: 1800
