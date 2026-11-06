@@ -1,94 +1,109 @@
-name: CNTi essential
+# Fork test of lfn-cnti/testsuite-action main (3c0e163, #37) before v1.4.0:
+# free5GC's essential job from #44 on a GitHub-hosted runner, with gh removed
+# as on free5GC's self-hosted runner. A push before this branch is the
+# default publishes nothing; a manual and a scheduled run with it as the
+# default publish the badge, the evidence artifact and the attestation.
+name: CNTi essential (fork test)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 3 * * *"
-  # Pull requests and merges that change what the run installs or how.
-  pull_request:
-    paths: &essential-paths
-      - charts/free5gc/**
-      - cnti-testsuite.yaml
-      - ci/kind-cnti.yaml
-      - .github/workflows/cnti.yml
+    - cron: "50 19 * * *"
   push:
-    branches:
-      - main
-    paths: *essential-paths
+    branches: [cnti-forktest]
 
 permissions:
   contents: read
 
-# One run per branch or pull request at a time. A new commit on a pull request
-# cancels the run for the previous one; runs on main queue instead, so every
-# merge gets its verdict.
 concurrency:
-  group: cnti-essential-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: cnti-forktest
+  cancel-in-progress: false
 
 jobs:
-  # Runs on main (nightly, after a merge, or by hand): the only runs that
-  # publish the badge, and the only ones with a write token. Forks that enable
-  # scheduled workflows do not run either job.
   essential:
-    if: github.repository == 'free5gc/free5gc-helm' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, linux, x64]
-    # An essential-tests run takes about 22 minutes on ubuntu-latest (4 vCPU) with
-    # suite v2.2.0; this leaves room for a slow day without
-    # letting a stuck run hold the runner for hours.
+    # gtp5g v0.10.2 builds on 22.04's kernel; ubuntu-latest's 7.0 breaks it.
+    runs-on: ubuntu-22.04
     timeout-minutes: 120
     permissions:
-      # Publishes the badge to the orphan branch `badges`.
       contents: write
-    env: &essential-env
-      # Fifteen functions share the runner: scaling and
-      # rollouts take longer than the suite's 60-second default.
+      id-token: write
+      attestations: write
+    env:
       CNTI_TESTSUITE_GENERIC_OPERATION_TIMEOUT: "180"
-    steps: &essential-steps
+    outputs:
+      exit_code: ${{ steps.cnti.outputs.exit_code }}
+    steps:
       - uses: actions/checkout@v4
         with:
-          # The suite doesn't need the job's write token; the action passes it
-          # to the badge publisher on its own.
           persist-credentials: false
 
-      # kind nodes share the host kernel. The self-hosted runner must have
-      # the gtp5g module installed and loaded before running the UPF.
-      - name: Check that the gtp5g kernel module is loaded
+      - name: Build and load the gtp5g kernel module
         run: |
           set -euo pipefail
-          if [ ! -d /sys/module/gtp5g ]; then
-            echo "The self-hosted runner must have gtp5g installed and loaded."
-            exit 1
-          fi
-          echo "gtp5g loaded on kernel $(uname -r)"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential "linux-headers-$(uname -r)"
+          git clone --depth 1 --branch v0.10.2 https://github.com/free5gc/gtp5g.git /tmp/gtp5g
+          make -C /tmp/gtp5g -j"$(nproc)"
+          sudo make -C /tmp/gtp5g install
+          sudo modprobe gtp5g
+          test -d /sys/module/gtp5g && echo "gtp5g loaded on kernel $(uname -r)"
 
-      # The existing binary cache stores ../../../.cnti-testsuite relative to
-      # the workspace. On this runner that differs from $HOME/.cnti-testsuite.
-      - name: Add the restored CNTi cache directory to PATH
+      # As on free5GC's self-hosted runner: no gh.
+      - name: Remove gh
         run: |
           set -euo pipefail
-          cnti_cache_dir="$(realpath -m "$GITHUB_WORKSPACE/../../../.cnti-testsuite")"
-          echo "$cnti_cache_dir" >> "$GITHUB_PATH"
+          while p=$(command -v gh); do sudo rm -f "$p"; hash -r; done
+          if command -v gh; then exit 1; fi
+          echo "gh removed"
 
-      - uses: lfn-cnti/testsuite-action@v1
+      - uses: lfn-cnti/testsuite-action@3c0e163cbbdde302cdd9abb9dbe8c2cbd6a72c71 # main, #37
+        id: cnti
         with:
-          # Pinned so a run is reproducible and a suite release is adopted on
-          # purpose; bump it after checking the release notes.
-          version: v2.2.0
+          version: v2.4.1
           cnf_config: cnti-testsuite.yaml
           kind_config: ci/kind-cnti.yaml
           install_timeout: 1800
           tests: cert
           badge_branch: badges
+          attest: "true"
 
-  # Pull requests that change the chart or the job, and manual runs on other
-  # branches: the same steps with a read-only token. The action publishes the
-  # badge only from the default branch, so nothing is published here.
-  essential-pr:
-    if: github.repository == 'free5gc/free5gc-helm' && (github.event_name == 'pull_request' || github.ref != 'refs/heads/main')
-    runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 120
+  # With gh again: what the run published, and what it should not have.
+  check:
+    needs: essential
+    if: always()
+    runs-on: ubuntu-latest
     permissions:
       contents: read
-    env: *essential-env
-    steps: *essential-steps
+    steps:
+      - name: Check what was published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN: ${{ github.run_id }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+        run: |
+          set -uo pipefail
+          default=$(gh api "repos/$REPO" --jq .default_branch)
+          on_default=false; [[ "$REF" == "refs/heads/$default" && "$EVENT" != pull_request* ]] && on_default=true
+          echo "event=$EVENT ref=$REF default=$default -> expect published: $on_default"
+          # The run is still going (this job): the finished essential job's own log.
+          job=$(gh api "repos/$REPO/actions/runs/$RUN/jobs" --jq '.jobs[]|select(.name=="essential")|.id')
+          log=$(curl -sSfL -H "Authorization: Bearer $GH_TOKEN" "${GITHUB_API_URL}/repos/$REPO/actions/jobs/$job/logs")
+          [[ -n "$log" ]] || { echo "::error::no log for the essential job"; exit 1; }
+          grep -a -E 'Default branch: |default branch is unknown|Badge (not )?published|Attested|Evidence not signed|essential tests passed' <<< "$log" | sed 's/^[^\t]*\t[^\t]*\t//' | sort -u
+          arts=$(gh api "repos/$REPO/actions/runs/$RUN/artifacts" --jq '[.artifacts[].name]|join(",")'); echo "artifacts: $arts"
+          badge_sha=$(gh api "repos/$REPO/commits/badges" --jq '.sha + " " + .commit.committer.date' 2>/dev/null || echo none); echo "badges branch: $badge_sha"
+          ok=true
+          grep -q 'gh: command not found' <<< "$log" && { echo "::error::something still called gh"; ok=false; }
+          if [[ "$on_default" == true ]]; then
+            grep -q "on the default branch: true" <<< "$log" || { echo "::error::the branch step did not see the default branch"; ok=false; }
+            grep -qE 'Published badge|Badge published' <<< "$log" || { echo "::error::no badge published"; ok=false; }
+            grep -q 'Attested ' <<< "$log" || { echo "::error::not attested"; ok=false; }
+            [[ ",$arts," == *",cnti-evidence,"* ]] || { echo "::error::no cnti-evidence artifact"; ok=false; }
+          else
+            grep -q "on the default branch: false" <<< "$log" || { echo "::error::the branch step should say false"; ok=false; }
+            grep -q 'Badge not published: .* is not the default branch' <<< "$log" || { echo "::error::expected the badge to be withheld"; ok=false; }
+            grep -q 'Attested ' <<< "$log" && { echo "::error::attested off the default branch"; ok=false; }
+          fi
+          $ok
