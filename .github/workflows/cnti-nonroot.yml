@@ -92,7 +92,11 @@ jobs:
           ue=$(kubectl -n free5gc get pod -o name | grep -E 'ueransim-ue|-ue-' | head -1)
           for i in $(seq 150); do kubectl -n free5gc exec ${ue#pod/} -- ip addr show uesimtun0 >/dev/null 2>&1 && break; sleep 2; done
           kubectl -n free5gc exec ${ue#pod/} -- ip addr show uesimtun0
-          kubectl -n free5gc exec ${ue#pod/} -- ping -I uesimtun0 -c 5 -W 3 8.8.8.8 && echo "TRAFFIC OK through the non-root UPFs"
+          # GitHub-hosted runners drop outbound ICMP, so ping says nothing; TCP over the UE's tunnel instead.
+          kubectl -n free5gc exec ${ue#pod/} -- ping -I uesimtun0 -c 3 -W 3 8.8.8.8 || echo "(ICMP blocked on the runner, as expected)"
+          code=$(kubectl -n free5gc exec ${ue#pod/} -- curl --interface uesimtun0 -sS -o /dev/null -m 20 -w '%{http_code}' https://www.google.com)
+          echo "HTTPS over uesimtun0: $code"
+          [ "$code" = 200 ] && echo "TRAFFIC OK through the UPFs ($([ "${{ matrix.job }}" = traffic-nonroot ] && echo non-root || echo root))"
       - name: Diagnostics
         if: failure()
         run: |
