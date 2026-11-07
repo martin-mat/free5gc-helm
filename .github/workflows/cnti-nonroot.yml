@@ -67,11 +67,16 @@ jobs:
         run: |
           set -euo pipefail
           vals=$(sed -n 's/^ *helm_values: //p' cnti-testsuite.yaml)
-          helm install free5gc charts/free5gc -n free5gc --create-namespace $vals --set deployDbPython=true --wait --timeout 20m
-          # The UE's subscriber, with the chart's own tool (docker/free5gc/free5gc-dbpython): the key and OPc UERANSIM's UE uses.
-          db=$(kubectl -n free5gc get pod -o name | grep dbpython | head -1)
-          kubectl -n free5gc exec ${db#pod/} -- python add_subscribers.py -a add -i 208930000000001 -n 1 >/dev/null
-          kubectl -n free5gc exec ${db#pod/} -- python add_subscribers.py -a list -n 1 | grep -E 'Summary|: [0-9]+$'
+          helm install free5gc charts/free5gc -n free5gc --create-namespace $vals --wait --timeout 20m
+          # The UE's subscriber through the WebUI's REST API (free5gc/webconsole v1.4.3's own
+          # default subscription, frontend/src/lib/dtos/subscription.test.ts): UERANSIM's UE.
+          svc=$(kubectl -n free5gc get svc -o name | grep -i webui | head -1)
+          kubectl -n free5gc port-forward $svc 5000:5000 >/tmp/pf.log 2>&1 &
+          for i in $(seq 30); do curl -s -o /dev/null http://127.0.0.1:5000/ && break; sleep 2; done
+          tok=$(curl -sS -X POST http://127.0.0.1:5000/api/login -H 'Content-Type: application/json' -d '{"username":"admin","password":"free5gc"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+          code=$(curl -sS -o /tmp/sub.out -w '%{http_code}' -X POST http://127.0.0.1:5000/api/subscriber/imsi-208930000000001/20893 -H "Token: $tok" -H 'Content-Type: application/json' --data @ci/nonroot/subscriber.json)
+          echo "subscriber POST: HTTP $code $(head -c 200 /tmp/sub.out)"
+          curl -sS http://127.0.0.1:5000/api/subscriber -H "Token: $tok" | head -c 300; echo
           kubectl -n free5gc get pods -o wide
           echo "--- the UPF processes: user and capabilities"
           for d in $(kubectl -n free5gc get deploy -o name | grep upf); do
