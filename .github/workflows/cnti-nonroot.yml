@@ -22,6 +22,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Build and load the gtp5g kernel module
         run: |
           set -euo pipefail
@@ -44,7 +45,11 @@ jobs:
       # install-tini as root), no image override.
       - name: Baseline charts
         if: matrix.job == 'traffic-baseline'
-        run: git checkout 92dc5bc -- charts/free5gc cnti-testsuite.yaml && grep -c 'runAsNonRoot' charts/free5gc/charts/free5gc-upf/values.yaml || true
+        run: |
+          set -euo pipefail
+          git checkout 92dc5bc -- charts/free5gc cnti-testsuite.yaml
+          if grep -q runAsNonRoot charts/free5gc/charts/free5gc-upf/values.yaml; then echo '::error::baseline still has the non-root values'; exit 1; fi
+          grep -n 'image: debian:12-slim' charts/free5gc/charts/mongodb-15.6.0/values.yaml
 
       - uses: lfn-cnti/testsuite-action@3c0e163cbbdde302cdd9abb9dbe8c2cbd6a72c71 # v1.4.0
         if: matrix.job == 'essential'
@@ -62,12 +67,16 @@ jobs:
         run: |
           set -euo pipefail
           vals=$(sed -n 's/^ *helm_values: //p' cnti-testsuite.yaml)
-          helm install free5gc charts/free5gc -n free5gc --create-namespace $vals --wait --timeout 20m
+          helm install free5gc charts/free5gc -n free5gc --create-namespace $vals --set deployDbPython=true --wait --timeout 20m
+          # The UE's subscriber, with the chart's own tool (docker/free5gc/free5gc-dbpython): the key and OPc UERANSIM's UE uses.
+          db=$(kubectl -n free5gc get pod -o name | grep dbpython | head -1)
+          kubectl -n free5gc exec ${db#pod/} -- python add_subscribers.py -a add -i 208930000000001 -n 1 >/dev/null
+          kubectl -n free5gc exec ${db#pod/} -- python add_subscribers.py -a list -n 1 | grep -E 'Summary|: [0-9]+$'
           kubectl -n free5gc get pods -o wide
           echo "--- the UPF processes: user and capabilities"
           for d in $(kubectl -n free5gc get deploy -o name | grep upf); do
             p=$(kubectl -n free5gc get pod -l "$(kubectl -n free5gc get $d -o jsonpath='{range .spec.selector.matchLabels}{@}{end}' >/dev/null; kubectl -n free5gc get $d -o go-template='{{range $k,$v := .spec.selector.matchLabels}}{{$k}}={{$v}},{{end}}' | sed 's/,$//')" -o name | head -1)
-            echo "$d ($p): $(kubectl -n free5gc exec ${p#pod/} -- sh -c 'id; grep -E "^(Name|CapEff|CapPrm)" /proc/1/status' | tr '\n' ' ')"
+            echo "$d ($p): $(kubectl -n free5gc exec ${p#pod/} -- sh -c 'id; for s in /proc/[0-9]*/status; do grep -q "^Name:.upf$" $s && grep -E "^(Name|Uid|CapEff|CapPrm)" $s; done' | tr '\n' ' ')"
           done
           helm install ueransim charts/ueransim -n free5gc --set global.free5gcReleaseName=free5gc --wait --timeout 10m
           kubectl -n free5gc get pods -o wide | grep -i -E 'gnb|ue'
