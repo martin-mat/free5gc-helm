@@ -1,0 +1,9 @@
+# Fork experiment: what nf_upf/Dockerfile (free5gc/free5gc-compose) would add,
+# on top of the published image: CAP_NET_ADMIN as file capabilities on the two
+# binaries that need it, so the UPF can run as a non-root user.
+FROM free5gc/upf:v4.3.0
+RUN apt-get update && apt-get install -y --no-install-recommends libcap2-bin \
+    && setcap cap_net_admin+ep /free5gc/upf \
+    && setcap cap_net_admin,cap_net_raw+ep "$(readlink -f "$(command -v iptables)")" \
+    && getcap /free5gc/upf "$(readlink -f "$(command -v iptables)")" \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*

@@ -12,4 +12,4 @@ deployments:
     - name: free5gc
       helm_directory: charts/free5gc
       namespace: free5gc
-      helm_values: --set mongodb.persistence.enabled=false --set mongodb.extraDeploy=null
+      helm_values: --set mongodb.persistence.enabled=false --set mongodb.extraDeploy=null --set free5gc-upf.upf.image.tag=v4.3.0-caps --set free5gc-upf.psaupf1.image.tag=v4.3.0-caps --set free5gc-upf.psaupf2.image.tag=v4.3.0-caps --set free5gc-upf.iupf1.image.tag=v4.3.0-caps
